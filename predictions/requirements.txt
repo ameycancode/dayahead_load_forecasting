@@ -1,0 +1,18 @@
+# Core data processing
+pandas==2.0.3
+numpy==1.24.4
+
+# AWS connectivity
+boto3==1.28.38
+pyathena==2.25.2
+psycopg2-binary>=2.8.0
+redshift_connector>=2.0.0
+
+# Date/time handling
+pytz==2023.3
+holidays==0.29
+
+# Weather API
+openmeteo-requests==1.1.0
+requests-cache==1.1.1
+retry-requests==2.0.0

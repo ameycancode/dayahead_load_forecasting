@@ -1,0 +1,1108 @@
+name: Generate Historical Energy Load Forecasts
+
+on:
+  push:
+    branches: [ develop, main ]
+    paths:
+      - '.github/scripts/gen_historical_forecasts/**'
+      - '.github/workflows/historical_forecasting.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to generate forecasts for'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - qa
+        - preprod
+        - prod
+      
+      combinations:
+        description: 'Which combinations to generate forecasts for'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - res_only
+        - medci_only
+        - smlcom_only
+        - solar_only
+        - nonsolar_only
+        - single_combination
+      
+      single_customer_profile:
+        description: 'Single customer profile (when single_combination selected)'
+        required: false
+        default: 'RES'
+        type: choice
+        options:
+        - RES
+        - MEDCI
+        - SMLCOM
+      
+      single_customer_segment:
+        description: 'Single customer segment (when single_combination selected)'
+        required: false
+        default: 'SOLAR'
+        type: choice
+        options:
+        - SOLAR
+        - NONSOLAR
+      
+      prediction_type:
+        description: 'Type of historical prediction to generate'
+        required: true
+        default: 'date_range'
+        type: choice
+        options:
+        - date_range      # Between start and end date
+        - days_past       # Number of days in the past
+        - multiple_dates  # Multiple specific dates (single date uses this too)
+      
+      start_date:
+        description: 'Start date (YYYY-MM-DD) - Required for date_range'
+        required: false
+        type: string
+        default: '2025-05-01'
+      
+      end_date:
+        description: 'End date (YYYY-MM-DD) - Required for date_range'
+        required: false
+        type: string
+        default: '2025-05-31'
+      
+      reference_date:
+        description: 'Reference date (YYYY-MM-DD) - For days_past, defaults to today'
+        required: false
+        type: string
+        default: ''
+      
+      days_back:
+        description: 'Number of days in the past - Required for days_past'
+        required: false
+        type: string
+        default: '7'
+      
+      multiple_dates_list:
+        description: 'Comma-separated dates (YYYY-MM-DD,YYYY-MM-DD). For single date: just one date'
+        required: false
+        type: string
+        default: '2025-06-01,2025-06-04,2025-06-07'
+
+# Set global environment variables for constants
+env:
+  DATABASE_TYPE: "redshift"
+  MAX_PARALLEL_REQUESTS: "6"
+  REQUEST_DELAY_SECONDS: "2"
+
+jobs:
+  determine_trigger_and_inputs:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set_inputs.outputs.environment }}
+      combinations: ${{ steps.set_inputs.outputs.combinations }}
+      single_customer_profile: ${{ steps.set_inputs.outputs.single_customer_profile }}
+      single_customer_segment: ${{ steps.set_inputs.outputs.single_customer_segment }}
+      prediction_type: ${{ steps.set_inputs.outputs.prediction_type }}
+      start_date: ${{ steps.set_inputs.outputs.start_date }}
+      end_date: ${{ steps.set_inputs.outputs.end_date }}
+      reference_date: ${{ steps.set_inputs.outputs.reference_date }}
+      days_back: ${{ steps.set_inputs.outputs.days_back }}
+      multiple_dates_list: ${{ steps.set_inputs.outputs.multiple_dates_list }}
+
+    steps:
+    - name: Determine trigger type and set inputs
+      id: set_inputs
+      run: |
+        echo "=== DETERMINING TRIGGER TYPE AND INPUTS ==="
+        echo "GitHub event name: ${{ github.event_name }}"
+        echo "GitHub ref: ${{ github.ref }}"
+        
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          echo "=== WORKFLOW_DISPATCH TRIGGER ==="
+          echo "Using inputs from manual trigger"
+          
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          COMBINATIONS="${{ github.event.inputs.combinations }}"
+          SINGLE_PROFILE="${{ github.event.inputs.single_customer_profile }}"
+          SINGLE_SEGMENT="${{ github.event.inputs.single_customer_segment }}"
+          PREDICTION_TYPE="${{ github.event.inputs.prediction_type }}"
+          START_DATE="${{ github.event.inputs.start_date }}"
+          END_DATE="${{ github.event.inputs.end_date }}"
+          REFERENCE_DATE="${{ github.event.inputs.reference_date }}"
+          DAYS_BACK="${{ github.event.inputs.days_back }}"
+          MULTIPLE_DATES_LIST="${{ github.event.inputs.multiple_dates_list }}"
+          
+        else
+          echo "=== PUSH TRIGGER ==="
+          echo "Using default values for push trigger"
+          
+          ENVIRONMENT="dev"
+          COMBINATIONS="smlcom_only"
+          PREDICTION_TYPE="days_past"
+          DAYS_BACK="7"
+          
+          # Set other defaults
+          SINGLE_PROFILE="RES"
+          SINGLE_SEGMENT="SOLAR"
+          START_DATE="2025-05-01"
+          END_DATE="2025-05-31"
+          REFERENCE_DATE=""
+          MULTIPLE_DATES_LIST="2025-06-01,2025-06-04,2025-06-07"
+        fi
+        
+        echo "=== FINAL INPUT VALUES ==="
+        echo "ENVIRONMENT: ${ENVIRONMENT}"
+        echo "COMBINATIONS: ${COMBINATIONS}"
+        echo "SINGLE_PROFILE: ${SINGLE_PROFILE}"
+        echo "SINGLE_SEGMENT: ${SINGLE_SEGMENT}"
+        echo "PREDICTION_TYPE: ${PREDICTION_TYPE}"
+        echo "START_DATE: ${START_DATE}"
+        echo "END_DATE: ${END_DATE}"
+        echo "REFERENCE_DATE: ${REFERENCE_DATE}"
+        echo "DAYS_BACK: ${DAYS_BACK}"
+        echo "MULTIPLE_DATES_LIST: ${MULTIPLE_DATES_LIST}"
+        echo "=== END INPUT VALUES ==="
+        
+        # Set outputs
+        echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
+        echo "combinations=${COMBINATIONS}" >> $GITHUB_OUTPUT
+        echo "single_customer_profile=${SINGLE_PROFILE}" >> $GITHUB_OUTPUT
+        echo "single_customer_segment=${SINGLE_SEGMENT}" >> $GITHUB_OUTPUT
+        echo "prediction_type=${PREDICTION_TYPE}" >> $GITHUB_OUTPUT
+        echo "start_date=${START_DATE}" >> $GITHUB_OUTPUT
+        echo "end_date=${END_DATE}" >> $GITHUB_OUTPUT
+        echo "reference_date=${REFERENCE_DATE}" >> $GITHUB_OUTPUT
+        echo "days_back=${DAYS_BACK}" >> $GITHUB_OUTPUT
+        echo "multiple_dates_list=${MULTIPLE_DATES_LIST}" >> $GITHUB_OUTPUT
+
+  validate_inputs:
+    needs: determine_trigger_and_inputs
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.validate.outputs.environment }}
+      database_type: ${{ steps.validate.outputs.database_type }}
+      combinations_matrix: ${{ steps.validate.outputs.combinations_matrix }}
+      prediction_dates: ${{ steps.validate.outputs.prediction_dates }}
+      total_predictions: ${{ steps.validate.outputs.total_predictions }}
+      validation_status: ${{ steps.validate.outputs.validation_status }}
+      max_parallel_requests: ${{ steps.validate.outputs.max_parallel_requests }}
+      request_delay_seconds: ${{ steps.validate.outputs.request_delay_seconds }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        echo "=== INSTALLING VALIDATION DEPENDENCIES ==="
+        python -m pip install --upgrade pip
+        pip install python-dateutil
+        echo "Python version: $(python --version)"
+        echo "=== VALIDATION DEPENDENCIES INSTALLED ==="
+
+    - name: Validate inputs and generate prediction plan
+      id: validate
+      run: |
+        echo "=== VALIDATING HISTORICAL FORECASTING INPUTS ==="
+        
+        # Add the repository root to PYTHONPATH
+        export PYTHONPATH=$PYTHONPATH:$(pwd)
+        echo "PYTHONPATH: $PYTHONPATH"
+
+        # Check if validation script exists
+        if [ -f ".github/scripts/gen_historical_forecasts/validate_historical_inputs.py" ]; then
+          echo " validate_historical_inputs.py script found"
+          echo "Script size: $(wc -c < .github/scripts/gen_historical_forecasts/validate_historical_inputs.py) bytes"
+        else
+          echo " validate_historical_inputs.py script not found"
+          echo "Available scripts in .github/scripts/gen_historical_forecasts/:"
+          ls -la .github/scripts/gen_historical_forecasts/ || echo "Directory doesn't exist"
+          exit 1
+        fi
+
+        # Set environment variables for validation script
+        export ENVIRONMENT="${{ needs.determine_trigger_and_inputs.outputs.environment }}"
+        export COMBINATIONS="${{ needs.determine_trigger_and_inputs.outputs.combinations }}"
+        export PREDICTION_TYPE="${{ needs.determine_trigger_and_inputs.outputs.prediction_type }}"
+        export SINGLE_PROFILE="${{ needs.determine_trigger_and_inputs.outputs.single_customer_profile }}"
+        export SINGLE_SEGMENT="${{ needs.determine_trigger_and_inputs.outputs.single_customer_segment }}"
+        export START_DATE="${{ needs.determine_trigger_and_inputs.outputs.start_date }}"
+        export END_DATE="${{ needs.determine_trigger_and_inputs.outputs.end_date }}"
+        export REFERENCE_DATE="${{ needs.determine_trigger_and_inputs.outputs.reference_date }}"
+        export DAYS_BACK="${{ needs.determine_trigger_and_inputs.outputs.days_back }}"
+        export MULTIPLE_DATES_LIST="${{ needs.determine_trigger_and_inputs.outputs.multiple_dates_list }}"
+
+        echo "=== ENVIRONMENT VARIABLES FOR VALIDATION ==="
+        echo "ENVIRONMENT: ${ENVIRONMENT}"
+        echo "DATABASE_TYPE: ${DATABASE_TYPE}"
+        echo "COMBINATIONS: ${COMBINATIONS}"
+        echo "PREDICTION_TYPE: ${PREDICTION_TYPE}"
+        echo "=== END ENVIRONMENT VARIABLES ==="
+
+        # Execute validation script
+        echo "Executing input validation script..."
+        python .github/scripts/gen_historical_forecasts/validate_historical_inputs.py
+
+        echo "=== INPUT VALIDATION COMPLETED ==="
+
+    - name: Display validation summary
+      run: |
+        echo "=== VALIDATION SUMMARY ==="
+        echo "Environment: ${{ steps.validate.outputs.environment }}"
+        echo "Database Type: ${{ steps.validate.outputs.database_type }}"
+        echo "Total Predictions: ${{ steps.validate.outputs.total_predictions }}"
+        echo "Validation Status: ${{ steps.validate.outputs.validation_status }}"
+        echo "Max Parallel Requests: ${{ steps.validate.outputs.max_parallel_requests }}"
+        echo "Request Delay: ${{ steps.validate.outputs.request_delay_seconds }} seconds"
+        echo ""
+        echo "Combinations to process:"
+        echo '${{ steps.validate.outputs.combinations_matrix }}' | python3 -m json.tool
+        echo ""
+        echo "Dates to process:"
+        echo '${{ steps.validate.outputs.prediction_dates }}' | python3 -m json.tool
+        echo "=== END VALIDATION SUMMARY ==="
+
+    - name: Display execution plan
+      run: |
+        echo "=== EXECUTION PLAN ==="
+        echo " The following execution plan has been validated and will proceed:"
+        echo ""
+        echo "Configuration:"
+        echo "   Environment: ${{ steps.validate.outputs.environment }}"
+        echo "   Database type: ${{ steps.validate.outputs.database_type }}"
+        
+        # Use Python script to count combinations and dates
+        export COMBINATIONS_MATRIX='${{ steps.validate.outputs.combinations_matrix }}'
+        export PREDICTION_DATES='${{ steps.validate.outputs.prediction_dates }}'
+        
+        COUNTS=$(python .github/scripts/gen_historical_forecasts/count_combinations_and_dates.py)
+        COMBO_COUNT=$(echo "$COUNTS" | grep "COMBO_COUNT=" | cut -d'=' -f2)
+        DATES_COUNT=$(echo "$COUNTS" | grep "DATES_COUNT=" | cut -d'=' -f2)
+        
+        echo "   Total combinations: ${COMBO_COUNT}"
+        echo "   Total dates: ${DATES_COUNT}"
+        echo "   Total predictions: ${{ steps.validate.outputs.total_predictions }}"
+        echo "   Max parallel requests: ${{ steps.validate.outputs.max_parallel_requests }}"
+        echo "   Request delay: ${{ steps.validate.outputs.request_delay_seconds }} seconds"
+        echo ""
+        
+        # Use Python script to display expected endpoints
+        export ENVIRONMENT="${{ steps.validate.outputs.environment }}"
+        python .github/scripts/gen_historical_forecasts/display_expected_endpoints.py
+        
+        echo ""
+        
+        # Use Python script to display prediction dates
+        python .github/scripts/gen_historical_forecasts/display_prediction_dates.py
+        
+        echo "=== EXECUTION PLAN VALIDATED - PROCEEDING WITH GENERATION ==="
+
+  setup_infrastructure_info:
+    needs: validate_inputs
+    runs-on: ubuntu-latest
+    if: needs.validate_inputs.outputs.validation_status == 'success'
+    environment: ${{ needs.validate_inputs.outputs.environment }}
+    outputs:
+      database_type: ${{ steps.setup_info.outputs.database_type }}
+      # Redshift outputs (Athena outputs will be empty)
+      redshift_cluster: ${{ steps.setup_info.outputs.redshift_cluster }}
+      redshift_database: ${{ steps.setup_info.outputs.redshift_database }}
+      redshift_operational_schema: ${{ steps.setup_info.outputs.redshift_operational_schema }}
+      redshift_operational_table: ${{ steps.setup_info.outputs.redshift_operational_table }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Setup database infrastructure information
+      id: setup_info
+      run: |
+        echo "=== SETTING UP DATABASE INFRASTRUCTURE INFO ==="
+        
+        # Add the repository root to PYTHONPATH
+        export PYTHONPATH=$PYTHONPATH:$(pwd)
+        echo "PYTHONPATH: $PYTHONPATH"
+
+        # Check if setup script exists
+        if [ -f ".github/scripts/gen_historical_forecasts/setup_database_info.py" ]; then
+          echo " setup_database_info.py script found"
+          echo "Script size: $(wc -c < .github/scripts/gen_historical_forecasts/setup_database_info.py) bytes"
+        else
+          echo " setup_database_info.py script not found"
+          echo "Available scripts in .github/scripts/gen_historical_forecasts/:"
+          ls -la .github/scripts/gen_historical_forecasts/ || echo "Directory doesn't exist"
+          exit 1
+        fi
+
+        # Set environment variables for setup script
+        export ENVIRONMENT="${{ needs.validate_inputs.outputs.environment }}"
+        export S3_BUCKET="${{ secrets.S3_BUCKET }}"
+        export REDSHIFT_CLUSTER_PREFIX="${{ vars.REDSHIFT_CLUSTER_IDENTIFIER_PREFIX }}"
+        export REDSHIFT_DATABASE="${{ vars.REDSHIFT_DATABASE }}"
+        export REDSHIFT_OPERATIONAL_SCHEMA_PREFIX="${{ vars.REDSHIFT_OPERATIONAL_SCHEMA_PREFIX }}"
+        export REDSHIFT_OPERATIONAL_TABLE="${{ vars.REDSHIFT_OPERATIONAL_TABLE }}"
+
+        echo "=== ENVIRONMENT VARIABLES FOR DATABASE SETUP ==="
+        echo "DATABASE_TYPE: ${DATABASE_TYPE}"
+        echo "ENVIRONMENT: ${ENVIRONMENT}"
+        echo "S3_BUCKET: ${S3_BUCKET}"
+        echo "=== END ENVIRONMENT VARIABLES ==="
+
+        # Execute database setup script
+        echo "Executing database infrastructure setup script..."
+        python .github/scripts/gen_historical_forecasts/setup_database_info.py
+
+        echo "=== DATABASE INFRASTRUCTURE SETUP COMPLETED ==="
+
+  setup_historical_endpoints:
+    needs: [validate_inputs, setup_infrastructure_info]
+    runs-on: ubuntu-latest
+    if: needs.validate_inputs.outputs.validation_status == 'success'
+    environment: ${{ needs.validate_inputs.outputs.environment }}
+   
+    strategy:
+      matrix:
+        combination: ${{ fromJson(needs.validate_inputs.outputs.combinations_matrix) }}
+      fail-fast: false
+      max-parallel: 6  # Create endpoints in parallel but not too many at once
+   
+    outputs:
+      endpoint_setup_status: ${{ steps.setup_endpoint.outputs.setup_status }}
+     
+    env:
+      # Core environment settings
+      ENVIRONMENT: ${{ needs.validate_inputs.outputs.environment }}
+      ENV_NAME: ${{ needs.validate_inputs.outputs.environment }}
+      DATABASE_TYPE: ${{ needs.validate_inputs.outputs.database_type }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
+     
+      # Customer combination settings
+      CUSTOMER_PROFILE: ${{ matrix.combination.profile }}
+      CUSTOMER_SEGMENT: ${{ matrix.combination.segment }}
+      S3_PREFIX: ${{ matrix.combination.profile }}-${{ matrix.combination.segment }}
+     
+      # Dynamic naming for endpoints
+      ENDPOINT_NAME: ${{ needs.validate_inputs.outputs.environment }}-energy-ml-endpoint-${{ matrix.combination.profile }}-${{ matrix.combination.segment }}
+     
+      # Historical mode configuration
+      HISTORICAL_MODE: "true"
+      ENDPOINT_CONFIG_S3_PREFIX: "endpoint-configs"
+      ENDPOINT_RECREATION_TIMEOUT: "900"
+      ENDPOINT_READY_BUFFER_TIME: "60"
+     
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Setup Python environment
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install boto3 pandas
+
+    - name: Setup endpoint for historical predictions
+      id: setup_endpoint
+      run: |
+        echo "=== SETTING UP ENDPOINT FOR HISTORICAL PREDICTIONS ==="
+        echo "Combination: ${{ env.CUSTOMER_PROFILE }}-${{ env.CUSTOMER_SEGMENT }}"
+        echo "Endpoint: ${{ env.ENDPOINT_NAME }}"
+        echo "Environment: ${{ env.ENVIRONMENT }}"
+       
+        # Execute the setup script
+        echo "Executing endpoint setup script..."
+        python .github/scripts/gen_historical_forecasts/setup_historical_endpoint.py
+       
+        SETUP_EXIT_CODE=$?
+       
+        if [ $SETUP_EXIT_CODE -eq 0 ]; then
+          echo " Endpoint setup completed successfully"
+          echo "setup_status=success" >> $GITHUB_OUTPUT
+         
+          # Save endpoint status to environment
+          echo "ENDPOINT_SETUP_STATUS=success" >> $GITHUB_ENV
+          echo "ENDPOINT_READY_FOR_HISTORICAL=true" >> $GITHUB_ENV
+         
+        else
+          echo " Endpoint setup failed"
+          echo "setup_status=failed" >> $GITHUB_OUTPUT
+         
+          # Save failure status but don't fail the job completely
+          echo "ENDPOINT_SETUP_STATUS=failed" >> $GITHUB_ENV
+          echo "ENDPOINT_READY_FOR_HISTORICAL=false" >> $GITHUB_ENV
+        fi
+       
+        echo "=== ENDPOINT SETUP COMPLETED ==="
+
+    - name: Verify endpoint status
+      run: |
+        echo "=== VERIFYING ENDPOINT STATUS ==="
+        echo "Endpoint: ${{ env.ENDPOINT_NAME }}"
+        echo "Setup status: ${{ steps.setup_endpoint.outputs.setup_status }}"
+       
+        # Verify endpoint is actually InService
+        aws sagemaker describe-endpoint --endpoint-name "${{ env.ENDPOINT_NAME }}" \
+          --query 'EndpointStatus' --output text || echo "Endpoint verification failed"
+       
+        if [ "${{ steps.setup_endpoint.outputs.setup_status }}" = "success" ]; then
+          echo " Endpoint ${{ env.ENDPOINT_NAME }} is ready for historical predictions"
+        else
+          echo " Endpoint ${{ env.ENDPOINT_NAME }} setup failed - historical predictions may fail"
+        fi
+
+    - name: Upload setup logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: endpoint-setup-logs-${{ matrix.combination.profile }}-${{ matrix.combination.segment }}
+        path: |
+          setup_historical_endpoint.py
+          *.log
+        retention-days: 7
+
+  generate_historical_predictions:
+    needs: [validate_inputs, setup_infrastructure_info, setup_historical_endpoints]
+    runs-on: ubuntu-latest
+    if: |
+      needs.validate_inputs.outputs.validation_status == 'success'
+    environment: ${{ needs.validate_inputs.outputs.environment }}
+   
+    strategy:
+      matrix:
+        combination: ${{ fromJson(needs.validate_inputs.outputs.combinations_matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(needs.validate_inputs.outputs.max_parallel_requests) }}
+
+    env:
+      # Core environment settings  
+      ENVIRONMENT: ${{ needs.validate_inputs.outputs.environment }}
+      ENV_NAME: ${{ needs.validate_inputs.outputs.environment }}
+      DATABASE_TYPE: ${{ needs.validate_inputs.outputs.database_type }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+     
+      # Lambda function configuration
+      LAMBDA_FUNCTION_NAME: ${{ needs.validate_inputs.outputs.environment }}-energy-daily-predictor-${{ matrix.combination.profile }}-${{ matrix.combination.segment }}
+      PROFILE: ${{ matrix.combination.profile }}
+      SEGMENT: ${{ matrix.combination.segment }}
+     
+      # Historical mode configuration
+      HISTORICAL_MODE: "true"
+      USE_EXISTING_ENDPOINT: "true"  # Key change: use existing endpoint
+      TEST_INVOCATION: "true"        # Key change: skip endpoint recreation
+      MAX_PARALLEL_REQUESTS: ${{ needs.validate_inputs.outputs.max_parallel_requests }}
+      REQUEST_DELAY_SECONDS: ${{ needs.validate_inputs.outputs.request_delay_seconds }}
+     
+      # Prediction dates
+      PREDICTION_DATES: ${{ needs.validate_inputs.outputs.prediction_dates }}
+     
+      # Database-specific environment variables (for validation)
+      REDSHIFT_CLUSTER: ${{ needs.setup_infrastructure_info.outputs.redshift_cluster }}
+      REDSHIFT_SCHEMA: ${{ needs.setup_infrastructure_info.outputs.redshift_operational_schema }}
+      REDSHIFT_TABLE: ${{ needs.setup_infrastructure_info.outputs.redshift_operational_table }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        echo "=== INSTALLING HISTORICAL FORECASTING DEPENDENCIES ==="
+        python -m pip install --upgrade pip
+        pip install boto3 pandas python-dateutil
+        echo "Python version: $(python --version)"
+        echo "Boto3 version: $(python -c 'import boto3; print(boto3.__version__)')"
+        echo "=== DEPENDENCIES INSTALLED ==="
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Verify endpoint availability
+      id: verify_endpoint
+      run: |
+        echo "=== VERIFYING ENDPOINT AVAILABILITY FOR HISTORICAL PREDICTIONS ==="
+        echo "Profile-Segment: ${{ env.PROFILE }}-${{ env.SEGMENT }}"
+        echo "Lambda function: ${{ env.LAMBDA_FUNCTION_NAME }}"
+        echo "Historical mode: ${{ env.HISTORICAL_MODE }}"
+        echo "Use existing endpoint: ${{ env.USE_EXISTING_ENDPOINT }}"
+        echo "Test invocation: ${{ env.TEST_INVOCATION }}"
+       
+        ENDPOINT_NAME="${{ needs.validate_inputs.outputs.environment }}-energy-ml-endpoint-${{ env.PROFILE }}-${{ env.SEGMENT }}"
+        echo "Expected endpoint: ${ENDPOINT_NAME}"
+       
+        # Check if endpoint exists and is InService
+        ENDPOINT_STATUS=$(aws sagemaker describe-endpoint --endpoint-name "${ENDPOINT_NAME}" \
+          --query 'EndpointStatus' --output text 2>/dev/null || echo "NotFound")
+       
+        echo "Endpoint status: ${ENDPOINT_STATUS}"
+       
+        if [ "${ENDPOINT_STATUS}" = "InService" ]; then
+          echo " Endpoint is InService and ready for historical predictions"
+          echo " Will use existing endpoint with test_invocation=true"
+          echo "endpoint_ready=true" >> $GITHUB_OUTPUT
+        else
+          echo " Endpoint not ready: ${ENDPOINT_STATUS}"
+          echo " Historical predictions may fail for this combination"
+          echo " Check setup_historical_endpoints job for this combination"
+          echo "endpoint_ready=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Generate historical predictions
+      if: steps.verify_endpoint.outputs.endpoint_ready == 'true'
+      id: generate_predictions
+      run: |
+        echo "=== GENERATING HISTORICAL PREDICTIONS ==="
+        echo "Lambda function: ${{ env.LAMBDA_FUNCTION_NAME }}"
+        echo "Profile: ${{ env.PROFILE }}"
+        echo "Segment: ${{ env.SEGMENT }}"
+        echo "Historical mode: ${{ env.HISTORICAL_MODE }}"
+        echo "Test invocation: ${{ env.TEST_INVOCATION }}"
+        echo "Use existing endpoint: ${{ env.USE_EXISTING_ENDPOINT }}"
+        echo "Environment: ${{ env.ENVIRONMENT }}"
+        echo "Database type: ${{ env.DATABASE_TYPE }}"
+        echo "Max parallel requests: ${{ env.MAX_PARALLEL_REQUESTS }}"
+        echo "Request delay: ${{ env.REQUEST_DELAY_SECONDS }} seconds"
+        echo ""
+       
+        # Add the repository root to PYTHONPATH
+        export PYTHONPATH=$PYTHONPATH:$(pwd)
+       
+        # Check if prediction generation script exists
+        SCRIPT_PATH=".github/scripts/gen_historical_forecasts/generate_historical_predictions.py"
+        if [ -f "${SCRIPT_PATH}" ]; then
+          echo " prediction script found: ${SCRIPT_PATH}"
+          echo "Script size: $(wc -c < ${SCRIPT_PATH}) bytes"
+        else
+          echo " Prediction script not found: ${SCRIPT_PATH}"
+          echo "Available scripts in .github/scripts/gen_historical_forecasts/:"
+          ls -la .github/scripts/gen_historical_forecasts/ || echo "Directory doesn't exist"
+          exit 1
+        fi
+
+        # Assume SageMaker role for Lambda invocation
+        echo "Assuming SageMaker role for Lambda operations..."
+        ROLE_CREDENTIALS=$(aws sts assume-role \
+          --role-arn ${{ secrets.SAGEMAKER_ROLE_ARN }} \
+          --role-session-name "GitHubActions-HistoricalForecasting-${{ github.run_id }}-${{ matrix.combination.profile }}-${{ matrix.combination.segment }}" \
+          --duration-seconds 3600 \
+          --output json)
+
+        if [ $? -ne 0 ]; then
+          echo " Failed to assume SageMaker role for Lambda operations"
+          echo "Role ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}"
+          exit 1
+        fi
+
+        # Extract credentials and export them
+        export AWS_ACCESS_KEY_ID=$(echo $ROLE_CREDENTIALS | jq -r '.Credentials.AccessKeyId')
+        export AWS_SECRET_ACCESS_KEY=$(echo $ROLE_CREDENTIALS | jq -r '.Credentials.SecretAccessKey')
+        export AWS_SESSION_TOKEN=$(echo $ROLE_CREDENTIALS | jq -r '.Credentials.SessionToken')
+
+        echo " Successfully assumed SageMaker role"
+        # Verify assumed role identity
+        echo "Verifying assumed role identity..."
+        aws sts get-caller-identity
+
+        # Construct Lambda function name directly
+        ENVIRONMENT="${{ needs.validate_inputs.outputs.environment }}"
+        PROFILE="${{ matrix.combination.profile }}"
+        SEGMENT="${{ matrix.combination.segment }}"
+        LAMBDA_FUNCTION_NAME="${ENVIRONMENT}-energy-daily-predictor-${PROFILE}-${SEGMENT}"
+
+        echo "Target Lambda function: ${LAMBDA_FUNCTION_NAME}"
+
+        # Set environment variables for prediction generation
+        export LAMBDA_FUNCTION_NAME="${LAMBDA_FUNCTION_NAME}"
+        export PROFILE="${PROFILE}"
+        export SEGMENT="${SEGMENT}"
+        export ENVIRONMENT="${ENVIRONMENT}"
+        export PREDICTION_DATES='${{ needs.validate_inputs.outputs.prediction_dates }}'
+        export AWS_REGION="${{ secrets.AWS_REGION }}"
+
+        # Set database-specific environment variables (Redshift only)
+        export REDSHIFT_CLUSTER="${{ needs.setup_infrastructure_info.outputs.redshift_cluster }}"
+        export REDSHIFT_DATABASE="${{ needs.setup_infrastructure_info.outputs.redshift_database }}"
+        export REDSHIFT_SCHEMA="${{ needs.setup_infrastructure_info.outputs.redshift_operational_schema }}"
+        export REDSHIFT_TABLE="${{ needs.setup_infrastructure_info.outputs.redshift_operational_table }}"
+
+        echo "=== ENVIRONMENT VARIABLES FOR PREDICTION GENERATION ==="
+        echo "LAMBDA_FUNCTION_NAME: ${LAMBDA_FUNCTION_NAME}"
+        echo "PROFILE: ${PROFILE}"
+        echo "SEGMENT: ${SEGMENT}"
+        echo "ENVIRONMENT: ${ENVIRONMENT}"
+        echo "DATABASE_TYPE: ${DATABASE_TYPE}"
+        echo "MAX_PARALLEL_REQUESTS: ${MAX_PARALLEL_REQUESTS}"
+        echo "REQUEST_DELAY_SECONDS: ${REQUEST_DELAY_SECONDS}"
+        echo "=== END ENVIRONMENT VARIABLES ==="
+
+        echo " Credentials configured for Lambda invocation"
+
+        # Execute historical prediction generation script
+        echo "Executing historical prediction generation script..."
+        python ${SCRIPT_PATH}
+       
+        PREDICTION_EXIT_CODE=$?
+       
+        if [ $PREDICTION_EXIT_CODE -eq 0 ]; then
+          echo " historical predictions completed successfully"
+          echo " Used existing endpoint optimization for maximum efficiency"
+        else
+          echo " Historical predictions failed or partially failed"
+          echo "Check individual date results for details"
+        fi
+       
+        echo "=== HISTORICAL PREDICTIONS GENERATION COMPLETED ==="
+
+    - name: Handle endpoint not ready
+      if: steps.verify_endpoint.outputs.endpoint_ready == 'false'
+      run: |
+        echo " ENDPOINT NOT READY FOR ${{ env.PROFILE }}-${{ env.SEGMENT }}"
+        echo "Endpoint was not properly set up in the setup_historical_endpoints job."
+        echo "Historical predictions will be skipped for this combination."
+        echo ""
+        echo " Troubleshooting steps:"
+        echo "  1. Check setup_historical_endpoints job logs for this combination"
+        echo "  2. Verify endpoint configuration exists in S3"
+        echo "  3. Check SageMaker permissions for endpoint creation"
+        echo "  4. Verify model and endpoint config resources exist"
+        echo ""
+        echo " Expected endpoint: ${{ needs.validate_inputs.outputs.environment }}-energy-ml-endpoint-${{ env.PROFILE }}-${{ env.SEGMENT }}"
+       
+        # Create empty result files for consistency
+        echo '{"combination": "${{ env.PROFILE }}-${{ env.SEGMENT }}", "error": "endpoint_not_ready", "total_dates": 0, "successful_dates": 0, "failed_dates": 0, "used_existing_endpoint": false, "endpoint_setup_failed": true}' > prediction_summary_${{ env.PROFILE }}_${{ env.SEGMENT }}.json
+
+    - name: Upload prediction results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: prediction-results-${{ matrix.combination.profile }}-${{ matrix.combination.segment }}-${{ needs.validate_inputs.outputs.environment }}
+        path: |
+          prediction_summary_*.json
+          successful_dates_*.txt
+          failed_dates_*.txt
+        retention-days: 30
+
+    - name: Display combination summary
+      if: always()
+      run: |
+        echo "=== COMBINATION SUMMARY FOR ${{ matrix.combination.profile }}-${{ matrix.combination.segment }} ==="
+       
+        # Add the repository root to PYTHONPATH
+        export PYTHONPATH=$PYTHONPATH:$(pwd)
+
+        # Check if summary display script exists
+        if [ -f ".github/scripts/gen_historical_forecasts/display_combination_summary.py" ]; then
+          echo " display_combination_summary.py script found"
+         
+          # Set environment variables for summary script
+          export PROFILE="${{ matrix.combination.profile }}"
+          export SEGMENT="${{ matrix.combination.segment }}"
+         
+          # Execute summary display script
+          python .github/scripts/gen_historical_forecasts/display_combination_summary.py
+        else
+          echo " display_combination_summary.py script not found"
+          echo "Cannot display detailed combination summary without the script"
+          echo "Please ensure all required Python scripts are present in .github/scripts/gen_historical_forecasts/"
+         
+          # Check if prediction summary file exists
+          if [ -f "prediction_summary_${{ matrix.combination.profile }}_${{ matrix.combination.segment }}.json" ]; then
+            echo " Raw summary file exists: prediction_summary_${{ matrix.combination.profile }}_${{ matrix.combination.segment }}.json"
+            echo " Check artifacts for detailed results"
+          else
+            echo " No prediction summary found - prediction generation may have failed"
+          fi
+         
+          exit 1
+        fi
+       
+        echo "=== END COMBINATION SUMMARY ==="
+  cleanup_historical_endpoints:
+    needs: [validate_inputs, setup_historical_endpoints, generate_historical_predictions]
+    runs-on: ubuntu-latest
+    if: always()  # Always run cleanup, even if predictions failed
+    environment: ${{ needs.validate_inputs.outputs.environment }}
+   
+    strategy:
+      matrix:
+        combination: ${{ fromJson(needs.validate_inputs.outputs.combinations_matrix) }}
+      fail-fast: false
+      max-parallel: 6  # Can cleanup faster than creation
+   
+    env:
+      # Core environment settings
+      ENVIRONMENT: ${{ needs.validate_inputs.outputs.environment }}
+      ENV_NAME: ${{ needs.validate_inputs.outputs.environment }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+     
+      # Customer combination settings
+      CUSTOMER_PROFILE: ${{ matrix.combination.profile }}
+      CUSTOMER_SEGMENT: ${{ matrix.combination.segment }}
+     
+      # Dynamic naming for endpoints
+      ENDPOINT_NAME: ${{ needs.validate_inputs.outputs.environment }}-energy-ml-endpoint-${{ matrix.combination.profile }}-${{ matrix.combination.segment }}
+     
+      # Cleanup configuration
+      HISTORICAL_MODE: "true"
+      CLEANUP_TIMEOUT: "300"  # 5 minutes max for cleanup
+      FORCE_CLEANUP: "true"   # Force cleanup even if in unexpected state
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Setup Python environment
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        pip install boto3
+
+    - name: Check prediction results before cleanup
+      id: check_results
+      run: |
+        echo "=== CHECKING PREDICTION RESULTS BEFORE CLEANUP ==="
+        echo "Combination: ${{ env.CUSTOMER_PROFILE }}-${{ env.CUSTOMER_SEGMENT }}"
+        echo "Endpoint: ${{ env.ENDPOINT_NAME }}"
+       
+        # Download prediction results if available
+        PREDICTION_JOB_STATUS="${{ needs.generate_historical_predictions.result }}"
+        echo "Prediction job status: ${PREDICTION_JOB_STATUS}"
+       
+        if [ "${PREDICTION_JOB_STATUS}" = "success" ]; then
+          echo " Predictions completed successfully"
+          echo "predictions_status=success" >> $GITHUB_OUTPUT
+        elif [ "${PREDICTION_JOB_STATUS}" = "failure" ]; then
+          echo " Predictions failed"
+          echo "predictions_status=failed" >> $GITHUB_OUTPUT
+        else
+          echo " Predictions status unknown: ${PREDICTION_JOB_STATUS}"
+          echo "predictions_status=unknown" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Cleanup historical endpoint
+      id: cleanup_endpoint
+      run: |
+        echo "=== CLEANING UP HISTORICAL ENDPOINT ==="
+        echo "Endpoint: ${{ env.ENDPOINT_NAME }}"
+        echo "Combination: ${{ env.CUSTOMER_PROFILE }}-${{ env.CUSTOMER_SEGMENT }}"
+        echo "Predictions status: ${{ steps.check_results.outputs.predictions_status }}"
+        echo "Force cleanup: ${{ env.FORCE_CLEANUP }}"
+       
+        # Set prediction status for cleanup script
+        export PREDICTIONS_STATUS="${{ steps.check_results.outputs.predictions_status }}"
+       
+        # Execute cleanup script
+        echo "Executing endpoint cleanup script..."
+        python .github/scripts/gen_historical_forecasts/cleanup_historical_endpoint.py
+       
+        CLEANUP_EXIT_CODE=$?
+       
+        if [ $CLEANUP_EXIT_CODE -eq 0 ]; then
+          echo " Endpoint cleanup completed successfully"
+          echo "cleanup_status=success" >> $GITHUB_OUTPUT
+        else
+          echo " Endpoint cleanup failed"
+          echo "cleanup_status=failed" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Verify cleanup completion
+      run: |
+        echo "=== VERIFYING CLEANUP COMPLETION ==="
+        echo "Endpoint: ${{ env.ENDPOINT_NAME }}"
+        echo "Cleanup status: ${{ steps.cleanup_endpoint.outputs.cleanup_status }}"
+       
+        # Verify endpoint is actually deleted
+        FINAL_STATUS=$(aws sagemaker describe-endpoint --endpoint-name "${{ env.ENDPOINT_NAME }}" \
+          --query 'EndpointStatus' --output text 2>/dev/null || echo "NotFound")
+       
+        echo "Final endpoint status: ${FINAL_STATUS}"
+       
+        if [ "${FINAL_STATUS}" = "NotFound" ]; then
+          echo " Endpoint successfully cleaned up - zero ongoing costs"
+        elif [ "${FINAL_STATUS}" = "Deleting" ]; then
+          echo " Endpoint still deleting - will complete shortly"
+        else
+          echo " Endpoint still exists: ${FINAL_STATUS}"
+          echo " Warning: Endpoint may be incurring costs"
+          echo " Manual cleanup may be required"
+        fi
+
+    - name: Log cleanup results for monitoring
+      if: always()
+      run: |
+        echo "=== CLEANUP RESULTS LOG ==="
+       
+        export ENDPOINT_NAME="${{ env.ENDPOINT_NAME }}"
+        export CUSTOMER_PROFILE="${{ env.CUSTOMER_PROFILE }}"
+        export CUSTOMER_SEGMENT="${{ env.CUSTOMER_SEGMENT }}"
+        export ENVIRONMENT="${{ env.ENVIRONMENT }}"
+        export CLEANUP_STATUS="${{ steps.cleanup_endpoint.outputs.cleanup_status }}"
+        export PREDICTIONS_STATUS="${{ steps.check_results.outputs.predictions_status }}"
+       
+        python .github/scripts/gen_historical_forecasts/create_cleanup_log.py
+       
+        echo "Cleanup log created for monitoring and cost tracking"
+
+    - name: Upload cleanup logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: cleanup-logs-${{ matrix.combination.profile }}-${{ matrix.combination.segment }}
+        path: |
+          cleanup_historical_endpoint.py
+          cleanup_log_*.json
+        retention-days: 30
+
+    - name: Display cleanup summary
+      if: always()
+      run: |
+        echo "=== FINAL CLEANUP SUMMARY FOR ${{ env.CUSTOMER_PROFILE }}-${{ env.CUSTOMER_SEGMENT }} ==="
+        echo "Endpoint: ${{ env.ENDPOINT_NAME }}"
+        echo "Cleanup status: ${{ steps.cleanup_endpoint.outputs.cleanup_status }}"
+        echo "Predictions status: ${{ steps.check_results.outputs.predictions_status }}"
+       
+        if [ "${{ steps.cleanup_endpoint.outputs.cleanup_status }}" = "success" ]; then
+          echo " Cost optimization: Endpoint successfully deleted"
+          echo " Result: Zero ongoing costs for this combination"
+          echo " Future historical runs will recreate endpoint as needed"
+        else
+          echo " Cleanup incomplete or failed"
+          echo " Warning: Endpoint may still be incurring costs"
+          echo " Recommended action: Manual verification and cleanup"
+          echo "   Command: aws sagemaker describe-endpoint --endpoint-name ${{ env.ENDPOINT_NAME }}"
+          echo "   If needed: aws sagemaker delete-endpoint --endpoint-name ${{ env.ENDPOINT_NAME }}"
+        fi
+       
+        echo "=== END CLEANUP SUMMARY ==="
+
+  generate_final_summary:
+    needs: [validate_inputs, setup_infrastructure_info, cleanup_historical_endpoints]
+    runs-on: ubuntu-latest
+    if: always() && needs.validate_inputs.outputs.validation_status == 'success'
+   
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install python-dateutil
+
+    - name: Download all prediction results
+      uses: actions/download-artifact@v4
+      with:
+        pattern: "prediction-results-*"
+        merge-multiple: true
+   
+    - name: Download all cleanup results
+      uses: actions/download-artifact@v4
+      with:
+        pattern: "cleanup-logs-*"
+        merge-multiple: true
+
+    - name: Debug - List downloaded files
+      run: |
+        echo "=== DEBUGGING DOWNLOADED FILES ==="
+        echo "Current directory: $(pwd)"
+        echo ""
+        echo "All files in current directory:"
+        ls -la
+        echo ""
+        echo "Looking for prediction summary files:"
+        ls -la prediction_summary_*.json 2>/dev/null || echo "No prediction_summary_*.json files found"
+        echo ""
+        echo "Looking for cleanup log files:"
+        ls -la cleanup_log_*.json 2>/dev/null || echo "No cleanup_log_*.json files found"
+        echo ""
+        echo "All JSON files:"
+        find . -name "*.json" -type f 2>/dev/null || echo "No JSON files found"
+        echo "=== END DEBUGGING ==="
+
+    - name: Generate comprehensive summary
+      run: |
+        echo "=== GENERATING HISTORICAL FORECASTING SUMMARY ==="
+       
+        export PYTHONPATH=$PYTHONPATH:$(pwd)
+       
+        # Check if final summary script exists
+        if [ -f ".github/scripts/gen_historical_forecasts/generate_final_summary.py" ]; then
+          echo " generate_final_summary.py script found"
+          echo "Script size: $(wc -c < .github/scripts/gen_historical_forecasts/generate_final_summary.py) bytes"
+        else
+          echo " generate_final_summary.py script not found"
+          echo "Available scripts in .github/scripts/gen_historical_forecasts/:"
+          ls -la .github/scripts/gen_historical_forecasts/ || echo "Directory doesn't exist"
+          exit 1
+        fi
+
+        # Environment variables
+        export ENVIRONMENT="${{ needs.validate_inputs.outputs.environment }}"
+        export COMBINATIONS_MATRIX='${{ needs.validate_inputs.outputs.combinations_matrix }}'
+        export PREDICTION_DATES='${{ needs.validate_inputs.outputs.prediction_dates }}'
+        export TOTAL_PREDICTIONS="${{ needs.validate_inputs.outputs.total_predictions }}"
+        export GITHUB_RUN_ID="${{ github.run_id }}"
+        export GITHUB_ACTOR="${{ github.actor }}"
+        export GITHUB_REPOSITORY="${{ github.repository }}"
+        export GITHUB_REF_NAME="${{ github.ref_name }}"
+       
+        # Enhanced environment variables
+        export MAX_PARALLEL_REQUESTS="${{ needs.validate_inputs.outputs.max_parallel_requests }}"
+        export REQUEST_DELAY_SECONDS="${{ needs.validate_inputs.outputs.request_delay_seconds }}"
+        export DATABASE_TYPE="${{ needs.validate_inputs.outputs.database_type }}"
+       
+        # Database-specific variables
+        export REDSHIFT_CLUSTER="${{ needs.setup_infrastructure_info.outputs.redshift_cluster }}"
+        export REDSHIFT_DATABASE="${{ needs.setup_infrastructure_info.outputs.redshift_database }}"
+        export REDSHIFT_OPERATIONAL_SCHEMA="${{ needs.setup_infrastructure_info.outputs.redshift_operational_schema }}"
+        export REDSHIFT_OPERATIONAL_TABLE="${{ needs.setup_infrastructure_info.outputs.redshift_operational_table }}"
+
+        echo "=== ENVIRONMENT VARIABLES ==="
+        echo "ENVIRONMENT: ${ENVIRONMENT}"
+        echo "DATABASE_TYPE: ${DATABASE_TYPE}"
+        echo "TOTAL_PREDICTIONS: ${TOTAL_PREDICTIONS}"
+        echo "GITHUB_RUN_ID: ${GITHUB_RUN_ID}"
+        echo "=== END ENVIRONMENT VARIABLES ==="
+
+        # Execute enhanced final summary script
+        echo "Executing final summary generation script..."
+        python .github/scripts/gen_historical_forecasts/generate_final_summary.py
+
+        echo "=== FINAL SUMMARY GENERATION COMPLETED ==="
+
+    - name: Upload final summary
+      uses: actions/upload-artifact@v4
+      with:
+        name: historical-forecasting-summary-${{ needs.validate_inputs.outputs.environment }}
+        path: |
+          historical_forecasting_summary_*.md
+          error_summary_*.md
+        retention-days: 90
+
+    - name: Display final results
+      run: |
+        echo "=== HISTORICAL FORECASTING EXECUTION COMPLETE ==="
+       
+        # Check if we have summary files
+        SUMMARY_COUNT=$(ls historical_forecasting_summary_*.md 2>/dev/null | wc -l)
+        ERROR_COUNT=$(ls error_summary_*.md 2>/dev/null | wc -l)
+       
+        if [ $SUMMARY_COUNT -gt 0 ]; then
+          echo " Generated summary reports:"
+          ls -la historical_forecasting_summary_*.md
+        fi
+       
+        if [ $ERROR_COUNT -gt 0 ]; then
+          echo " Error reports generated:"
+          ls -la error_summary_*.md
+        fi
+       
+        echo ""
+        echo " Artifacts Created:"
+        echo "  • Individual prediction summaries per combination"
+        echo "  • Comprehensive execution summary"
+        echo "  • Cleanup logs for cost tracking"
+        echo ""
+        echo " Next Steps:"
+        echo "  1. Download and review the execution summary"
+        echo "  2. Check your database for the generated forecasts"
+        echo "  3. Update BI dashboards with historical data"
+        echo "  4. Investigate any failed predictions if needed"
+        echo ""
+        echo "=== HISTORICAL FORECASTING COMPLETE ==="
+
+    - name: Create workflow summary
+      run: |
+        echo "=== CREATING GITHUB WORKFLOW SUMMARY ==="
+       
+        # Add the repository root to PYTHONPATH
+        export PYTHONPATH=$PYTHONPATH:$(pwd)
+
+        # Check if workflow summary script exists
+        if [ -f ".github/scripts/gen_historical_forecasts/create_github_workflow_summary.py" ]; then
+          echo " create_github_workflow_summary.py script found"
+         
+          # Set environment variables for summary script
+          export ENVIRONMENT="${{ needs.validate_inputs.outputs.environment }}"
+          export TOTAL_PREDICTIONS="${{ needs.validate_inputs.outputs.total_predictions }}"
+          export GITHUB_RUN_ID="${{ github.run_id }}"
+          export AWS_REGION="${{ secrets.AWS_REGION }}"
+          export COMBINATIONS_MATRIX='${{ needs.validate_inputs.outputs.combinations_matrix }}'
+          export PREDICTION_DATES='${{ needs.validate_inputs.outputs.prediction_dates }}'
+         
+          # Calculate summary statistics using previous script
+          SUMMARY_STATS=$(python .github/scripts/gen_historical_forecasts/calculate_workflow_summary_stats.py)
+          export COMBO_COUNT=$(echo "$SUMMARY_STATS" | grep "SUMMARY_COMBO_COUNT=" | cut -d'=' -f2)
+          export DATES_COUNT=$(echo "$SUMMARY_STATS" | grep "SUMMARY_DATES_COUNT=" | cut -d'=' -f2)
+          export DATE_RANGE=$(echo "$SUMMARY_STATS" | grep "SUMMARY_DATE_RANGE=" | cut -d'=' -f2)
+         
+          # Execute workflow summary creation script
+          python .github/scripts/gen_historical_forecasts/create_github_workflow_summary.py
+         
+        else
+          echo " create_github_workflow_summary.py script not found"
+          echo "Creating basic workflow summary..."
+         
+          # Fallback basic summary
+          echo "## Historical Energy Load Forecasting Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ needs.validate_inputs.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Database:** ${DATABASE_TYPE}" >> $GITHUB_STEP_SUMMARY
+          echo "**Execution Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Quick Actions" >> $GITHUB_STEP_SUMMARY
+          echo "- [Download Execution Summary](../../actions/runs/${{ github.run_id }}/artifacts)" >> $GITHUB_STEP_SUMMARY
+          echo "- [View CloudWatch Logs](https://console.aws.amazon.com/cloudwatch/home?region=${{ secrets.AWS_REGION }}#logs:)" >> $GITHUB_STEP_SUMMARY
+        fi
+       
+        echo "=== WORKFLOW SUMMARY CREATION COMPLETED ==="
